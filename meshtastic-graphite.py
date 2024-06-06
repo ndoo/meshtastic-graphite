@@ -31,7 +31,8 @@ def onMQTTMessage(mqttc, obj, msg):
         decryptMessagePacket(messagePacket)
         isEncrypted = True
 
-    fromNode = f"{getattr(messagePacket, "from"):x}"
+    fromNode = getattr(messagePacket, "from")
+    fromNode = f"{fromNode:x}"
     logging.info(f"protobuf: {fromNode}: Received packet")
 
     portnum = messagePacket.decoded.portnum
