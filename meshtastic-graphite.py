@@ -6,7 +6,8 @@ import sys
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
-import google.protobuf
+from google.protobuf.message import Message
+import graphyte
 from meshtastic import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
 import paho.mqtt.client as mqttClient
 
@@ -14,7 +15,7 @@ from globals import Globals
 
 def onMQTTMessage(mqttc, obj, msg):
     """Callback invoke when we receive a message via MQTT"""
-    logging.info(f"MQTT: Received message on topic {msg.topic} at QoS {msg.qos}")
+    logging.debug(f"MQTT: Received message on topic {msg.topic} at QoS {msg.qos}")
     serviceEnvelope = mqtt_pb2.ServiceEnvelope()
     isEncrypted = False
     try:
@@ -28,16 +29,16 @@ def onMQTTMessage(mqttc, obj, msg):
         decryptMessagePacket(messagePacket)
         isEncrypted = True
 
+    fromNode = f"{getattr(messagePacket, "from"):x}"
+    logging.info(f"protobuf: {fromNode}: Received packet")
+
     portnum = messagePacket.decoded.portnum
 
     if portnum == portnums_pb2.POSITION_APP:
-        onMeshtasticPosition(messagePacket.decoded)
+        onMeshtasticPosition(fromNode, messagePacket.decoded)
 
     elif portnum == portnums_pb2.TELEMETRY_APP:
-        onMeshtasticTelemetry(messagePacket.decoded)
-
-    elif portnum == portnums_pb2.TEXT_MESSAGE_APP:
-        onMeshtasticTextMessage(messagePacket.decoded)
+        onMeshtasticTelemetry(fromNode, messagePacket.decoded)
 
 def onMQTTConnect(client, userdata, flags, rc, properties):
     """Callback invoke when we connect to MQTT broker"""
@@ -49,6 +50,10 @@ def onMQTTConnect(client, userdata, flags, rc, properties):
     topic = _globals.getMqttRootTopic()
     mqtt.subscribe(topic)
     logging.info(f"MQTT: Subscribed to {topic}")
+
+    args = _globals.getArgs()
+    graphyte.init(args.graphite_server, prefix=args.graphite_prefix)
+    logging.info(f"graphyte: Connected to Graphite server {args.graphite_server} with prefix {args.graphite_prefix}")
 
 def onMQTTDisconnect(client, userdata, rc):
     """Callback invoke when we disconnect from MQTT broker"""
@@ -79,85 +84,45 @@ def decryptMessagePacket(messagePacket):
         data = mesh_pb2.Data()
         data.ParseFromString(decrypted_bytes)
         messagePacket.decoded.CopyFrom(data)
-        logging.info(f"protobuf: Decoded encrypted packet {messagePacket.id}")
+
+        logging.debug(f"protobuf: Decoded encrypted packet {messagePacket.id}")
+        logging.debug(f"{messagePacket.decoded}")
     except Exception as e:
-        logging.info(f"protobuf: Decryption failed for packet {messagePacket.id}: {str(e)}")
+        logging.warning(f"protobuf: Decryption failed for packet {messagePacket.id}: {str(e)}")
         return
 
-    logging.info(f"protobuf: Received packet from {getattr(messagePacket, "from")}")
-    logging.debug(f"{messagePacket.decoded}")
+    #sendGraphiteMetric(f"{getattr(messagePacket, "id")}.rssi", getattr(messagePacket, "rx_rssi", None))
 
-def onMeshtasticPosition(messagePacket):
-    logging.info(f"Meshtastic: Received position") 
+def onMeshtasticPosition(fromNode, messagePacket):
+    logging.info(f"Meshtastic: {fromNode}: Received position") 
     pos = mesh_pb2.Position()
     pos.ParseFromString(messagePacket.payload)
-    logging.debug(f"{pos}") 
+    logging.debug(f"{pos}")
 
-def onMeshtasticTelemetry(messagePacket):
-    logging.info(f"Meshtastic: Received telemetry")
-    rssi = getattr(messagePacket, "rx_rssi", None)
+    logging.info(f"graphyte: {fromNode}: Sending position")
+    for posLabel, posValue in pos.ListFields():
+        if posValue != None:
+            sendGraphiteMetric(fromNode, f"position.{posLabel.name}", posValue)
 
-    env = telemetry_pb2.Telemetry()
-    env.ParseFromString(messagePacket.payload)
+def onMeshtasticTelemetry(fromNode, messagePacket):
+    logging.info(f"Meshtastic: {fromNode}: Received telemetry")
 
-    # Device Metrics
-    device_metrics_dict = {
-        'Battery Level': env.device_metrics.battery_level,
-        'Voltage': round(env.device_metrics.voltage, 2),
-        'Channel Utilization': round(env.device_metrics.channel_utilization, 1),
-        'Air Utilization': round(env.device_metrics.air_util_tx, 1)
-    }
-    if rssi:
-        device_metrics_dict["RSSI"] = rssi
+    telemetry = telemetry_pb2.Telemetry()
+    telemetry.ParseFromString(messagePacket.payload)
 
-    # Environment Metrics
-    environment_metrics_dict = {
-        'Temp': round(env.environment_metrics.temperature, 2),
-        'Humidity': round(env.environment_metrics.relative_humidity, 0),
-        'Pressure': round(env.environment_metrics.barometric_pressure, 2),
-        'Gas Resistance': round(env.environment_metrics.gas_resistance, 2)
-    }
+    for telemetryMessageLabel, telemetryMessage in telemetry.ListFields():
+        if not isinstance(telemetryMessage, Message):
+            continue
 
-    if rssi:
-        environment_metrics_dict["RSSI"] = rssi
+        logging.info(f"graphyte: {fromNode}: Sending {telemetryMessageLabel.name}")
+        for telemetryLabel, telemetryValue in telemetryMessage.ListFields():
+            if telemetryValue != None:
+                sendGraphiteMetric(fromNode, f"{telemetryMessageLabel.name}.{telemetryLabel.name}", telemetryValue)
 
-    # Power Metrics
-    # TODO
-    # Air Quality Metrics
-    # TODO
-
-    device_metrics_string = "Device metrics: "
-    environment_metrics_string = "Environment metrics: "
-
-    # Only use metrics that are non-zero
-    has_device_metrics = True
-    has_environment_metrics = True
-    has_device_metrics = all(value != 0 for value in device_metrics_dict.values())
-    has_environment_metrics = all(value != 0 for value in environment_metrics_dict.values())
-
-    # Loop through the dictionary and append non-empty values to the string
-    for label, value in device_metrics_dict.items():
-        if value is not None:
-            device_metrics_string += f"{label}: {value}, "
-
-    for label, value in environment_metrics_dict.items():
-        if value is not None:
-            environment_metrics_string += f"{label}: {value}, "
-
-    # Remove the trailing comma and space
-    device_metrics_string = device_metrics_string.rstrip(", ")
-    environment_metrics_string = environment_metrics_string.rstrip(", ")
-
-    # Print or use the final string
-    if has_device_metrics:
-        logging.debug(device_metrics_string)
-    if has_environment_metrics:
-        logging.debug(environment_metrics_string)
-
-def onMeshtasticTextMessage(messagePacket):
-    logging.info(f"Meshtastic: Received text message")
-    msg = messagePacket.payload.decode("utf-8")
-    logging.debug(f"{msg}")
+def sendGraphiteMetric(fromNode, metric, value):
+    metric = f"{fromNode}.{metric}"
+    logging.debug(f"graphyte: Sending {metric} with value {value}")
+    graphyte.send(metric, float(value))
 
 def initArgParser():
     """Initialize the command line argument parsing."""
@@ -211,6 +176,19 @@ def initArgParser():
         "-k", "--meshtastic-key",
         help="The Meshtastic channel",
         default="AQ==",
+        required=False,
+    )
+
+    parser.add_argument(
+        "-g", "--graphite-server",
+        help="The Graphite server",
+        required=True,
+    )
+
+    parser.add_argument(
+        "-G", "--graphite-prefix",
+        help="Prefix for Graphite metrics",
+        default="meshtastic",
         required=False,
     )
 
