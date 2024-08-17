@@ -132,28 +132,28 @@ def initArgParser():
 
     parser.add_argument(
         "-H", "--mqtt-host",
-        help="The MQTT broker host name or IP.",
+        help="The MQTT broker host name or IP",
         default="mqtt.meshtastic.org",
         required=False,
     )
 
     parser.add_argument(
         "-P", "--mqtt-port",
-        help="The MQTT broker port.",
+        help="The MQTT broker port",
         default=1883,
         required=False
     )
 
     parser.add_argument(
         "-u", "--mqtt-user",
-        help="The MQTT broker user name.",
+        help="The MQTT broker user name",
         default="meshdev",
         required=False
     )
 
     parser.add_argument(
         "-p", "--mqtt-password",
-        help="The MQTT broker password.",
+        help="The MQTT broker password",
         default="large4cats",
         required=False
     )
@@ -174,7 +174,7 @@ def initArgParser():
 
     parser.add_argument(
         "-k", "--meshtastic-key",
-        help="The Meshtastic channel",
+        help="The Meshtastic channel encryption key",
         default="AQ==",
         required=False,
     )
