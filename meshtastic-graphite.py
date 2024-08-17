@@ -58,7 +58,7 @@ def onMQTTConnect(client, userdata, flags, reason_code, properties):
     graphyte.init(args.graphite_server, prefix=args.graphite_prefix)
     logging.info(f"graphyte: Connected to Graphite server {args.graphite_server} with prefix {args.graphite_prefix}")
 
-def onMQTTDisconnect(client, userdata, reason_code, properties):
+def onMQTTDisconnect(client, userdata, disconnect_flags, reason_code, properties):
     """Callback invoke when we disconnect from MQTT broker"""
     if reason_code != 0:
         logging.error(f"MQTT: unexpected disconnection error {reason_code}")
