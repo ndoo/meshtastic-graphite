@@ -1,5 +1,5 @@
 cryptography
 meshtastic
-paho_mqtt
+paho_mqtt >= 2.0.0
 protobuf
 graphyte

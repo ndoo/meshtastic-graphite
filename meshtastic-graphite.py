@@ -26,7 +26,7 @@ def onMQTTMessage(mqttc, obj, msg):
     except Exception as e:
         logging.warning(f"protobuf: Failed to parse: {str(e)}")
         return
-    
+
     if messagePacket.HasField("encrypted") and not messagePacket.HasField("decoded"):
         decryptMessagePacket(messagePacket)
         isEncrypted = True
@@ -43,11 +43,11 @@ def onMQTTMessage(mqttc, obj, msg):
     elif portnum == portnums_pb2.TELEMETRY_APP:
         onMeshtasticTelemetry(fromNode, messagePacket.decoded)
 
-def onMQTTConnect(client, userdata, flags, rc, properties):
+def onMQTTConnect(client, userdata, flags, reason_code, properties):
     """Callback invoke when we connect to MQTT broker"""
     _globals = Globals.getInstance()
-    if rc != 0:
-        logging.error(f"MQTT: unexpected connection error {rc}")
+    if reason_code != 0:
+        logging.error(f"MQTT: unexpected connection error {reason_code}")
 
     mqtt = _globals.getMqtt()
     topic = _globals.getMqttRootTopic()
@@ -58,13 +58,10 @@ def onMQTTConnect(client, userdata, flags, rc, properties):
     graphyte.init(args.graphite_server, prefix=args.graphite_prefix)
     logging.info(f"graphyte: Connected to Graphite server {args.graphite_server} with prefix {args.graphite_prefix}")
 
-def onMQTTDisconnect(client, userdata, rc):
+def onMQTTDisconnect(client, userdata, reason_code, properties):
     """Callback invoke when we disconnect from MQTT broker"""
-    if rc != 0:
-        logging.error(f"MQTT: unexpected disconnection error {rc}")
-        _globals = Globals.getInstance()
-        if _globals.getLoop() is not None:
-            _globals.getLoop().stop()
+    if reason_code != 0:
+        logging.error(f"MQTT: unexpected disconnection error {reason_code}")
 
 def decryptMessagePacket(messagePacket):
     try:
@@ -72,8 +69,8 @@ def decryptMessagePacket(messagePacket):
         args = _globals.getArgs()
 
         # Convert key to bytes
-        key = base64.b64decode(args.meshtastic_key.encode('ascii'))
-    
+        key = base64.b64decode(args.meshtastic_key.encode('ascii') + b'==')
+
         noncePacketId = getattr(messagePacket, "id").to_bytes(8, "little")
         nonceFromNode = getattr(messagePacket, "from").to_bytes(8, "little")
 
@@ -229,7 +226,7 @@ def initMQTT():
         mqtt.on_disconnect = onMQTTDisconnect
         mqtt.username_pw_set(args.mqtt_user, args.mqtt_password)
         mqtt.connect(args.mqtt_host, int(args.mqtt_port))
-        
+
     except Exception as e:
         logging.error(f"MQTT client error: {e}")
         sys.exit(1)
