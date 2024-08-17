@@ -1,0 +1,4 @@
+services:
+  meshtastic-graphite:
+    build: https://github.com/ndoo/meshtastic-graphite.git
+    command: -d -g 192.168.0.123 # Refer to ./meshtastic-graphite.py --help

@@ -35,6 +35,18 @@ options:
 For example:
 `./meshtastic-graphite.py -g 192.168.1.123 -v`
 
+### Running with Docker
+
+1. `docker build -t meshtastic-graphite .`
+2. `docker run --rm meshtastic-graphite -d -g [graphite server IP] [arguments]`
+
+## Running with Docker Compose
+
+1. `cp docker-compose.yml.sample docker-compose.yml`
+2. `$EDITOR docker-compose.yml` and add/change arguments as desired
+3. `docker compose build`
+4. `docker compose up -d`
+
 ## Implemented Metrics
 
 * Position
