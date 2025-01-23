@@ -5,98 +5,45 @@ import base64
 import logging
 import signal
 import sys
+import time
 
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
 from google.protobuf.message import Message
 import graphyte
-from meshtastic import mesh_pb2, mqtt_pb2, portnums_pb2, telemetry_pb2
-import paho.mqtt.client as mqttClient
+import meshtastic
+from meshtastic import mesh_pb2, portnums_pb2, serial_interface, telemetry_pb2
+from pubsub import pub
 
 from globals import Globals
 
-def onMQTTMessage(mqttc, obj, msg):
-    """Callback invoke when we receive a message via MQTT"""
-    logging.debug(f"MQTT: Received message on topic {msg.topic} at QoS {msg.qos}")
-    serviceEnvelope = mqtt_pb2.ServiceEnvelope()
-    isEncrypted = False
-    try:
-        serviceEnvelope.ParseFromString(msg.payload)
-        messagePacket = serviceEnvelope.packet
-    except Exception as e:
-        logging.warning(f"protobuf: Failed to parse: {str(e)}")
+def onReceive(packet, interface):
+
+    fromNode = packet["fromId"]
+
+    logging.info(f"meshtastic: {fromNode}: Received packet")
+
+    if "decoded" not in packet:
+        logging.info(f"meshtastic: {fromNode}: Empty packet")
         return
 
-    if messagePacket.HasField("encrypted") and not messagePacket.HasField("decoded"):
-        decryptMessagePacket(messagePacket)
-        isEncrypted = True
+    portnum = packet["decoded"]["portnum"]
 
-    fromNode = getattr(messagePacket, "from")
-    fromNode = f"{fromNode:x}"
-    logging.info(f"protobuf: {fromNode}: Received packet")
+    if portnum == "POSITION_APP":
+        onMeshtasticPosition(fromNode, packet["decoded"])
 
-    portnum = messagePacket.decoded.portnum
+    elif portnum == "TELEMETRY_APP":
+        onMeshtasticTelemetry(fromNode, packet["decoded"])
 
-    if portnum == portnums_pb2.POSITION_APP:
-        onMeshtasticPosition(fromNode, messagePacket.decoded)
-
-    elif portnum == portnums_pb2.TELEMETRY_APP:
-        onMeshtasticTelemetry(fromNode, messagePacket.decoded)
-
-def onMQTTConnect(client, userdata, flags, reason_code, properties):
-    """Callback invoke when we connect to MQTT broker"""
+def onConnection(interface, topic=pub.AUTO_TOPIC):
+    logging.info(f"meshtastic: Connected")
     _globals = Globals.getInstance()
-    if reason_code != 0:
-        logging.error(f"MQTT: unexpected connection error {reason_code}")
-
-    mqtt = _globals.getMqtt()
-    topic = _globals.getMqttRootTopic()
-    mqtt.subscribe(topic)
-    logging.info(f"MQTT: Subscribed to {topic}")
-
     args = _globals.getArgs()
     graphyte.init(args.graphite_server, prefix=args.graphite_prefix)
     logging.info(f"graphyte: Connected to Graphite server {args.graphite_server} with prefix {args.graphite_prefix}")
 
-def onMQTTDisconnect(client, userdata, disconnect_flags, reason_code, properties):
-    """Callback invoke when we disconnect from MQTT broker"""
-    if reason_code != 0:
-        logging.error(f"MQTT: unexpected disconnection error {reason_code}")
-
-def decryptMessagePacket(messagePacket):
-    try:
-        _globals = Globals.getInstance()
-        args = _globals.getArgs()
-
-        # Convert key to bytes
-        key = base64.b64decode(args.meshtastic_key.encode('ascii') + b'==')
-
-        noncePacketId = getattr(messagePacket, "id").to_bytes(8, "little")
-        nonceFromNode = getattr(messagePacket, "from").to_bytes(8, "little")
-
-        # Put both parts into a single byte array.
-        nonce = noncePacketId + nonceFromNode
-
-        cipher = Cipher(algorithms.AES(key), modes.CTR(nonce), backend=default_backend())
-        decryptor = cipher.decryptor()
-        decrypted_bytes = decryptor.update(getattr(messagePacket, "encrypted")) + decryptor.finalize()
-
-        data = mesh_pb2.Data()
-        data.ParseFromString(decrypted_bytes)
-        messagePacket.decoded.CopyFrom(data)
-
-        logging.debug(f"protobuf: Decoded encrypted packet {messagePacket.id}")
-        logging.debug(f"{messagePacket.decoded}")
-    except Exception as e:
-        logging.warning(f"protobuf: Decryption failed for packet {messagePacket.id}: {str(e)}")
-        return
-
-    #sendGraphiteMetric(f"{getattr(messagePacket, "id")}.rssi", getattr(messagePacket, "rx_rssi", None))
-
 def onMeshtasticPosition(fromNode, messagePacket):
     logging.info(f"Meshtastic: {fromNode}: Received position") 
     pos = mesh_pb2.Position()
-    pos.ParseFromString(messagePacket.payload)
+    pos.ParseFromString(messagePacket["payload"])
     logging.debug(f"{pos}")
 
     logging.info(f"graphyte: {fromNode}: Sending position")
@@ -108,7 +55,7 @@ def onMeshtasticTelemetry(fromNode, messagePacket):
     logging.info(f"Meshtastic: {fromNode}: Received telemetry")
 
     telemetry = telemetry_pb2.Telemetry()
-    telemetry.ParseFromString(messagePacket.payload)
+    telemetry.ParseFromString(messagePacket["payload"])
 
     for telemetryMessageLabel, telemetryMessage in telemetry.ListFields():
         if not isinstance(telemetryMessage, Message):
@@ -131,54 +78,10 @@ def initArgParser():
     args = _globals.getArgs()
 
     parser.add_argument(
-        "-H", "--mqtt-host",
-        help="The MQTT broker host name or IP",
-        default="mqtt.meshtastic.org",
+        "-s", "--serial",
+        help="The serial port",
         required=False,
     )
-
-    parser.add_argument(
-        "-P", "--mqtt-port",
-        help="The MQTT broker port",
-        default=1883,
-        required=False
-    )
-
-    parser.add_argument(
-        "-u", "--mqtt-user",
-        help="The MQTT broker user name",
-        default="meshdev",
-        required=False
-    )
-
-    parser.add_argument(
-        "-p", "--mqtt-password",
-        help="The MQTT broker password",
-        default="large4cats",
-        required=False
-    )
-
-    parser.add_argument(
-        "-t", "--mqtt-root-topic",
-        help="The MQTT root topic",
-        default="msh/SG_923/2/e/",
-        required=False,
-    )
-
-    parser.add_argument(
-        "-c", "--meshtastic-channel",
-        help="The Meshtastic channel",
-        default="LongFast",
-        required=False,
-    )
-
-    parser.add_argument(
-        "-k", "--meshtastic-key",
-        help="The Meshtastic channel encryption key",
-        default="AQ==",
-        required=False,
-    )
-
     parser.add_argument(
         "-g", "--graphite-server",
         help="The Graphite server",
@@ -212,25 +115,6 @@ def initArgParser():
     _globals.setArgs(args)
     _globals.setParser(parser)
 
-def initMQTT():
-    """Initialize the MQTT client and connect to broker"""
-    _globals = Globals.getInstance()
-    args = _globals.getArgs()
-    mqtt = _globals.getMqtt()
-    try:
-        mqtt = mqttClient.Client(mqttClient.CallbackAPIVersion.VERSION2)
-        _globals.setMqtt(mqtt)
-        _globals.setMqttRootTopic(args.mqtt_root_topic + args.meshtastic_channel + "/#")
-        mqtt.on_message = onMQTTMessage
-        mqtt.on_connect = onMQTTConnect
-        mqtt.on_disconnect = onMQTTDisconnect
-        mqtt.username_pw_set(args.mqtt_user, args.mqtt_password)
-        mqtt.connect(args.mqtt_host, int(args.mqtt_port))
-
-    except Exception as e:
-        logging.error(f"MQTT client error: {e}")
-        sys.exit(1)
-
 def main():
     """Main program function"""
 
@@ -248,24 +132,21 @@ def main():
 
     logging.basicConfig(level=args.loglevel)
 
-    if args.meshtastic_key == "AQ==":
-        logging.info("Meshtastic: Key is default, expanding to AES128")
-        args.meshtastic_key = "1PG7OiApB1nwvP+rz05pAQ=="
+    pub.subscribe(onReceive, "meshtastic.receive")
+    pub.subscribe(onConnection, "meshtastic.connection.established")
 
-    initMQTT()
-
-    mqtt = _globals.getMqtt()
+    interface =  meshtastic.serial_interface.SerialInterface(args.serial)
 
     def signal_handler(signal, frame):
-        mqtt.disconnect()
-        mqtt.loop_stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGABRT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    mqtt.loop_forever()
+    while True:
+        time.sleep(1000)
+    interface.close()
 
 if __name__ == "__main__":
     main()

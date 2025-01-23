@@ -1,5 +1,4 @@
-cryptography
-meshtastic
-paho_mqtt >= 2.0.0
-protobuf
-graphyte
+graphyte==1.7.1
+meshtastic==2.5.10
+protobuf==5.29.3
+Pypubsub==4.0.3
