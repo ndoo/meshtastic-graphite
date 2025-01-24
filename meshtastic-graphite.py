@@ -1,7 +1,6 @@
 #!/usr/bin/python3
 
 import argparse
-import base64
 import logging
 import signal
 import sys
@@ -10,13 +9,40 @@ import time
 from google.protobuf.message import Message
 import graphyte
 import meshtastic
-from meshtastic import mesh_pb2, portnums_pb2, serial_interface, telemetry_pb2
+from meshtastic import mesh_pb2, serial_interface, telemetry_pb2
 from pubsub import pub
 
 from globals import Globals
 
-def onReceive(packet, interface):
+connected = False
 
+
+def onConnection(interface, topic=pub.AUTO_TOPIC):
+    """Code to run on interface connection"""
+
+    # Used to break out of main loop
+    global connected
+    connected = True
+    logging.info(f"meshtastic: Connected")
+    _globals = Globals.getInstance()
+    args = _globals.getArgs()
+    graphyte.init(args.graphite_server,
+                  prefix=args.graphite_prefix, interval=1)
+    logging.info(f"graphyte: Connected to Graphite server {
+                 args.graphite_server} with prefix {args.graphite_prefix}")
+
+
+def onDisconnection(interface):
+    """On interface disconnection"""
+
+    # Used to inhibit breaking out of main loop
+    global connected
+    connected = False
+    logging.info(f"meshtastic: Disconnected")
+
+
+def onReceive(packet, interface):
+    """On receive of packet"""
     fromNode = packet["fromId"]
 
     logging.info(f"meshtastic: {fromNode}: Received packet")
@@ -33,15 +59,10 @@ def onReceive(packet, interface):
     elif portnum == "TELEMETRY_APP":
         onMeshtasticTelemetry(fromNode, packet["decoded"])
 
-def onConnection(interface, topic=pub.AUTO_TOPIC):
-    logging.info(f"meshtastic: Connected")
-    _globals = Globals.getInstance()
-    args = _globals.getArgs()
-    graphyte.init(args.graphite_server, prefix=args.graphite_prefix)
-    logging.info(f"graphyte: Connected to Graphite server {args.graphite_server} with prefix {args.graphite_prefix}")
 
 def onMeshtasticPosition(fromNode, messagePacket):
-    logging.info(f"Meshtastic: {fromNode}: Received position") 
+    """On receive of Meshtastic Position packet"""
+    logging.info(f"meshtastic: {fromNode}: Received position")
     pos = mesh_pb2.Position()
     pos.ParseFromString(messagePacket["payload"])
     logging.debug(f"{pos}")
@@ -51,8 +72,10 @@ def onMeshtasticPosition(fromNode, messagePacket):
         if posValue != None:
             sendGraphiteMetric(fromNode, f"position.{posLabel.name}", posValue)
 
+
 def onMeshtasticTelemetry(fromNode, messagePacket):
-    logging.info(f"Meshtastic: {fromNode}: Received telemetry")
+    """On receive of Meshtastic Telemetry packet"""
+    logging.info(f"meshtastic: {fromNode}: Received telemetry")
 
     telemetry = telemetry_pb2.Telemetry()
     telemetry.ParseFromString(messagePacket["payload"])
@@ -61,15 +84,20 @@ def onMeshtasticTelemetry(fromNode, messagePacket):
         if not isinstance(telemetryMessage, Message):
             continue
 
-        logging.info(f"graphyte: {fromNode}: Sending {telemetryMessageLabel.name}")
+        logging.info(f"graphyte: {fromNode}: Sending {
+                     telemetryMessageLabel.name}")
         for telemetryLabel, telemetryValue in telemetryMessage.ListFields():
             if telemetryValue != None:
-                sendGraphiteMetric(fromNode, f"{telemetryMessageLabel.name}.{telemetryLabel.name}", telemetryValue)
+                sendGraphiteMetric(fromNode, f"{telemetryMessageLabel.name}.{
+                                   telemetryLabel.name}", telemetryValue)
+
 
 def sendGraphiteMetric(fromNode, metric, value):
+    """Send metric key/value to Graphite"""
     metric = f"{fromNode}.{metric}"
     logging.debug(f"graphyte: Sending {metric} with value {value}")
     graphyte.send(metric, float(value))
+
 
 def initArgParser():
     """Initialize the command line argument parsing."""
@@ -115,8 +143,9 @@ def initArgParser():
     _globals.setArgs(args)
     _globals.setParser(parser)
 
+
 def main():
-    """Main program function"""
+    """Main setup and loop"""
 
     _globals = Globals.getInstance()
     parser = argparse.ArgumentParser(
@@ -134,8 +163,9 @@ def main():
 
     pub.subscribe(onReceive, "meshtastic.receive")
     pub.subscribe(onConnection, "meshtastic.connection.established")
+    pub.subscribe(onDisconnection, "meshtastic.connection.lost")
 
-    interface =  meshtastic.serial_interface.SerialInterface(args.serial)
+    interface = meshtastic.serial_interface.SerialInterface(args.serial)
 
     def signal_handler(signal, frame):
         sys.exit(0)
@@ -144,9 +174,13 @@ def main():
     signal.signal(signal.SIGABRT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    while True:
-        time.sleep(1000)
+    # Wait for connection, then check every second
+    time.sleep(10)
+    while connected:
+        time.sleep(1)
+
     interface.close()
+
 
 if __name__ == "__main__":
     main()
